@@ -3,7 +3,7 @@
 #include <cryptoTools/Common/Defines.h>
 #include <cryptoTools/Network/IoBuffer.h>
 #include <cryptoTools/Network/SocketAdapter.h>
-
+#include <cryptoTools/Network/util.h>
 
 #ifdef ENABLE_NET_LOG
 #include <cryptoTools/Common/Log.h>
@@ -13,6 +13,7 @@
 #include <list>
 #include <deque>
 
+#include "TLS.h"
 
 namespace osuCrypto {
 
@@ -29,11 +30,13 @@ namespace osuCrypto {
 
         // The default constructors
         Channel() = default;
-        Channel(const Channel& copy) = default;
+        Channel(const Channel& copy);
         Channel(Channel&& move) = default;
 
         // Special constructor used to construct a Channel from some socket.
         Channel(IOService& ios, SocketInterface* sock);
+
+        ~Channel();
 
         // Default assignment
         Channel& operator=(Channel&& move);
@@ -299,15 +302,16 @@ namespace osuCrypto {
         void close();
 
         // Aborts all current operations (connect, send, receive).
-        void cancel();
+        void cancel(bool close = true);
 
         void asyncClose(std::function<void()> completionHandle);
 
-        void asyncCancel(std::function<void()> completionHandle);
+        void asyncCancel(std::function<void()> completionHandle, bool close = true);
 
 
-        enum class Status { Normal, Closing, Closed, Canceling, Canceled };
+        enum class Status { Normal, Closing, Closed, Canceling};
 
+        std::string commonName();
 
         std::shared_ptr<ChannelBase> mBase;
 
@@ -331,12 +335,6 @@ namespace osuCrypto {
         case Channel::Status::Normal:
             o << "Status::Normal";
             break;
-            //case Channel::Status::RecvSizeError:
-            //    o << "Status::RecvSizeError";
-            //    break;
-            //case Channel::Status::FatalError:
-            //    o << "Status::FatalError";
-            //    break;
         case Channel::Status::Closing:
             o << "Status::Closing";
             break;
@@ -345,9 +343,6 @@ namespace osuCrypto {
             break;
         case Channel::Status::Canceling:
             o << "Status::Canceling";
-            break;
-        case Channel::Status::Canceled:
-            o << "Status::Canceled";
             break;
         default:
             o << "Status::??????";
@@ -375,29 +370,23 @@ namespace osuCrypto {
 
         StartSocketOp(std::shared_ptr<ChannelBase> chl);
 
-        void asyncPerform(ChannelBase* base, io_completion_handle&& completionHandle, bool sendOp);
-        void cancel();
-
-
-
+        void setHandle(io_completion_handle&& completionHandle, bool sendOp);
+        void cancelPending(bool sendOp);
+        void connectCallback(const error_code& ec);
         bool canceled() const;
         void asyncConnectToServer();
         void recvServerMessage();
         void sendConnectionString();
         void retryConnect(const error_code& ec);
 
-
         char mRecvChar;
-        void setSocket(std::unique_ptr<SocketInterface> socket, const error_code& ec);
-
-
-        completion_handle mConnectCallback;
-
+        void setSocket(std::unique_ptr<BoostSocketInterface> socket, const error_code& ec);
+        void finalize(std::unique_ptr<SocketInterface> sock, error_code ec);
 
         void addComHandle(completion_handle&& comHandle)
         {
             boost::asio::dispatch(mStrand, [this, ch = std::forward<completion_handle>(comHandle)]() mutable {
-                if (mIsComplete)
+                if (mFinalized)
                 {
                     ch(mEC);
                 }
@@ -409,26 +398,22 @@ namespace osuCrypto {
 
 
         boost::asio::deadline_timer mTimer;
-        //u64 mPerformCount = 2;
 
         enum class ComHandleStatus { Uninit, Init, Eval };
         ComHandleStatus mSendStatus = ComHandleStatus::Uninit;
         ComHandleStatus mRecvStatus = ComHandleStatus::Uninit;
 
-        boost::asio::strand<boost::asio::io_context::executor_type> mStrand;
-
+        boost::asio::strand<boost::asio::io_context::executor_type>& mStrand;
         std::vector<u8> mSendBuffer;
-        //details::MoveSendBuff<std::string> mHandshakeSendOp;
-
         std::unique_ptr<BoostSocketInterface> mSock;
-        //boost::asio::ip::tcp::socket* mSock;
+
+#ifdef ENABLE_WOLFSSL
+        std::unique_ptr<TLSSocket> mTLSSock;
+#endif
         double mBackoff = 1;
-
-        bool mIsComplete = false, mCanceled = false;
-        error_code mEC;
-
+        bool mFinalized = false, mCanceled = false, mIsFirst;
+        error_code mEC, mConnectEC;
         ChannelBase* mChl;
-        //std::shared_ptr<ChannelBase> mSharedChl;
         io_completion_handle mSendComHandle, mRecvComHandle;
         std::list<completion_handle> mComHandles;
 
@@ -442,10 +427,18 @@ namespace osuCrypto {
         StartSocketSendOp(StartSocketOp* base)
             : mBase(base) {}
 
-        void asyncPerform(ChannelBase* base, io_completion_handle&& completionHandle) override {
-            mBase->asyncPerform(base, std::forward<io_completion_handle>(completionHandle), true);
+        void asyncPerform(ChannelBase*, io_completion_handle&& completionHandle) override {
+            mBase->setHandle(std::forward<io_completion_handle>(completionHandle), true);
         }
-        void asyncCancelPending(ChannelBase* base) override { mBase->cancel(); }
+        void asyncCancelPending(ChannelBase* base, const error_code& ec) override { 
+            mBase->cancelPending(true); 
+        }
+
+        void asyncCancel(ChannelBase* base, const error_code& ec, io_completion_handle&& completionHandle) override
+        { 
+            mBase->setHandle(std::forward<io_completion_handle>(completionHandle), true);
+            mBase->cancelPending(true); 
+        }
 
 
         std::string toString() const override {
@@ -464,9 +457,15 @@ namespace osuCrypto {
             : mBase(base) {}
 
         void asyncPerform(ChannelBase* base, io_completion_handle&& completionHandle) override {
-            mBase->asyncPerform(base, std::forward<io_completion_handle>(completionHandle), false);
+            mBase->setHandle(std::forward<io_completion_handle>(completionHandle), false);
         }
-        void asyncCancelPending(ChannelBase* base) override { mBase->cancel(); }
+        void asyncCancelPending(ChannelBase* base, const error_code& ec) override { mBase->cancelPending(false); }
+
+        void asyncCancel(ChannelBase* base, const error_code& ec, io_completion_handle&& completionHandle) override
+        { 
+            mBase->setHandle(std::forward<io_completion_handle>(completionHandle), false);
+            mBase->cancelPending(false);
+        }
 
         std::string toString() const override {
             return std::string("StartSocketRecvOp # ")
@@ -485,9 +484,9 @@ namespace osuCrypto {
         ChannelBase(Session& endpoint, std::string localName, std::string remoteName);
         ChannelBase(IOService& ios, SocketInterface* sock);
         ~ChannelBase();
-
+        
         IOService& mIos;
-        std::unique_ptr<boost::asio::io_service::work> mWork;
+        Work mWork;
         std::unique_ptr<StartSocketOp> mStartOp;
 
         std::shared_ptr<SessionBase> mSession;
@@ -496,38 +495,37 @@ namespace osuCrypto {
 
         Channel::Status mStatus = Channel::Status::Normal;
 
-        bool mRecvSocketAvailable = true;
-        bool mSendSocketAvailable = true;
+        std::atomic<u32> mChannelRefCount;
+
+        std::shared_ptr<ChannelBase> mRecvLoopLifetime, mSendLoopLifetime;
+
+        bool recvSocketAvailable() const { return !mRecvLoopLifetime;}
+        bool sendSocketAvailable() const { return !mSendLoopLifetime;}
 
         bool mRecvCancelNew = false;
         bool mSendCancelNew = false;
 
-
-        bool mPrintClose = false;
         std::unique_ptr<SocketInterface> mHandle;
 
-        boost::asio::strand<boost::asio::io_context::executor_type> mSendStrand, mRecvStrand;
+        boost::asio::strand<boost::asio::io_context::executor_type> mStrand;
 
         u64 mTotalSentData = 0;
         u64 mTotalRecvData = 0;
 
-        std::atomic<u8> mCloseCount;
-        std::function<void()> mCloseHandle;
-
-        void cancelRecvQueue();
-        void cancelSendQueue();
+        void cancelRecvQueue(const error_code& ec);
+        void cancelSendQueue(const error_code& ec);
 
         void close();
-        void cancel();
+        void cancel(bool close);
         void asyncClose(std::function<void()> completionHandle);
-        void asyncCancel(std::function<void()> completionHandle);
+        void asyncCancel(std::function<void()> completionHandle, bool close);
 
         IOService& getIOService() { return mIos; }
 
-        bool stopped() { return mStatus != Channel::Status::Normal; }
+        bool stopped() { return mStatus == Channel::Status::Closed; }
 
-        bool mActiveRecvSizeError = false;
-        bool activeRecvSizeError() const { return mActiveRecvSizeError; }
+        //bool mActiveRecvSizeError = false;
+        //bool activeRecvSizeError() const { return mActiveRecvSizeError; }
 
 
         SpscQueue<SBO_ptr<details::SendOperation>> mSendQueue;
@@ -538,6 +536,8 @@ namespace osuCrypto {
 
         void asyncPerformRecv();
         void asyncPerformSend();
+
+        std::string commonName();
 
 
         std::array<boost::asio::mutable_buffer, 2> mSendBuffers;
@@ -558,7 +558,7 @@ namespace osuCrypto {
     typename std::enable_if<is_container<Container>::value, void>::type Channel::asyncSend(std::unique_ptr<Container> c)
     {
         // not zero and less that 32 bits
-        Expects(channelBuffSize(*c) - 1 < u32(-2) && !mBase->stopped());
+        Expects(channelBuffSize(*c) - 1 < u32(-2));
 
         auto op = make_SBO_ptr<
             details::SendOperation,
@@ -573,7 +573,7 @@ namespace osuCrypto {
     typename std::enable_if<is_container<Container>::value, void>::type Channel::asyncSend(std::shared_ptr<Container> c)
     {
         // not zero and less that 32 bits
-        Expects(channelBuffSize(*c) - 1 < u32(-2) && !mBase->stopped());
+        Expects(channelBuffSize(*c) - 1 < u32(-2));
 
 
         auto op = make_SBO_ptr<
@@ -590,7 +590,7 @@ namespace osuCrypto {
     typename std::enable_if<is_container<Container>::value, void>::type Channel::asyncSend(const Container& c)
     {
         // not zero and less that 32 bits
-        Expects(channelBuffSize(c) - 1 < u32(-2) && !mBase->stopped());
+        Expects(channelBuffSize(c) - 1 < u32(-2));
 
         auto* buff = (u8*)c.data();
         auto size = c.size() * sizeof(typename Container::value_type);
@@ -606,7 +606,7 @@ namespace osuCrypto {
     typename std::enable_if<is_container<Container>::value, void>::type Channel::asyncSend(Container&& c)
     {
         // not zero and less that 32 bits
-        Expects(channelBuffSize(c) - 1 < u32(-2) && !mBase->stopped());
+        Expects(channelBuffSize(c) - 1 < u32(-2));
 
         auto op = make_SBO_ptr<
             details::SendOperation, 
@@ -623,7 +623,7 @@ namespace osuCrypto {
         Channel::asyncRecv(Container & c)
     {
         // not zero and less that 32 bits
-        Expects(channelBuffSize(c) - 1 < u32(-2) && !mBase->stopped());
+        Expects(channelBuffSize(c) - 1 < u32(-2));
 
         std::future<void> future;
         auto op = make_SBO_ptr<
@@ -642,9 +642,6 @@ namespace osuCrypto {
         has_resize<Container, void(typename Container::size_type)>::value, std::future<void>>::type
         Channel::asyncRecv(Container & c)
     {
-        // not zero and less that 32 bits
-        Expects(!mBase->stopped());
-
         std::future<void> future;
         auto op = make_SBO_ptr<
             details::RecvOperation, 
@@ -662,9 +659,6 @@ namespace osuCrypto {
         has_resize<Container, void(typename Container::size_type)>::value, std::future<void>>::type
         Channel::asyncRecv(Container & c, std::function<void()> fn)
     {
-        // not zero and less that 32 bits
-        Expects(!mBase->stopped());
-
         std::future<void> future;
         auto op = make_SBO_ptr<
             details::RecvOperation,
@@ -685,9 +679,6 @@ namespace osuCrypto {
         has_resize<Container, void(typename Container::size_type)>::value, std::future<void>>::type
         Channel::asyncRecv(Container & c, std::function<void(const error_code&)> fn)
     {
-        // not zero and less that 32 bits
-        Expects(!mBase->stopped());
-
         std::future<void> future;
         auto op = make_SBO_ptr<
             details::RecvOperation,
@@ -729,7 +720,7 @@ namespace osuCrypto {
         auto size = sizeT * sizeof(T);
 
         // not zero and less that 32 bits
-        Expects(size - 1 < u32(-2) && !mBase->stopped());
+        Expects(size - 1 < u32(-2));
 
         std::future<void> future;
         auto op = make_SBO_ptr<
@@ -758,7 +749,7 @@ namespace osuCrypto {
         auto size = sizeT * sizeof(T);
 
         // not zero and less that 32 bits
-        Expects(size - 1 < u32(-2) && !mBase->stopped());
+        Expects(size - 1 < u32(-2));
 
         std::future<void> future;
         auto op = make_SBO_ptr<
@@ -778,7 +769,7 @@ namespace osuCrypto {
         auto size = sizeT * sizeof(T);
 
         // not zero and less that 32 bits
-        Expects(size - 1 < u32(-2) && !mBase->stopped());
+        Expects(size - 1 < u32(-2));
 
         std::future<void> future;
         auto op = make_SBO_ptr<
@@ -799,7 +790,7 @@ namespace osuCrypto {
         auto size = sizeT * sizeof(T);
 
         // not zero and less that 32 bits
-        Expects(size - 1 < u32(-2) && !mBase->stopped());
+        Expects(size - 1 < u32(-2));
 
         auto op = make_SBO_ptr<
             details::SendOperation, 
@@ -825,7 +816,7 @@ namespace osuCrypto {
         Channel::asyncSend(Container&& c, std::function<void()> callback)
     {
         // not zero and less that 32 bits
-        Expects(channelBuffSize(c) - 1 < u32(-2) && !mBase->stopped());
+        Expects(channelBuffSize(c) - 1 < u32(-2));
 
         auto op = make_SBO_ptr<
             details::SendOperation,
@@ -843,7 +834,7 @@ namespace osuCrypto {
         Channel::asyncSend(Container&& c, std::function<void(const error_code&)> callback)
     {
         // not zero and less that 32 bits
-        Expects(channelBuffSize(c) - 1 < u32(-2) && !mBase->stopped());
+        Expects(channelBuffSize(c) - 1 < u32(-2));
 
         auto op = make_SBO_ptr<
             details::SendOperation,

@@ -22,25 +22,45 @@
 #include <cryptoTools/Common/TestCollection.h>
 #include <chrono>
 #include <thread>
+#include "cryptoTools/Common/CLP.h"
+
 using namespace osuCrypto;
 
 namespace tests_cryptoTools
 {
+    TLSContext getIfTLS(const CLP& cmd)
+    {
+        TLSContext ctx;
 
-    void BtNetwork_AnonymousMode_Test()
+#ifdef ENABLE_WOLFSSL
+        if (cmd.isSet("tls"))
+        {
+            error_code ec;
+            ctx.init(TLSContext::Mode::Both, ec);
+            if (!ec) ctx.requestClientCert(ec);
+            if (!ec) ctx.loadCert(sample_ca_cert_pem, ec);
+            if (!ec) ctx.loadKeyPair(sample_server_cert_pem, sample_server_key_pem, ec);
+            if (ec)
+                throw std::runtime_error(ec.message());
+        }
+#endif
+        return ctx;
+    }
+
+
+    void BtNetwork_AnonymousMode_Test(const CLP& cmd)
     {
         IOService ioService(0);
-
+        auto tls = getIfTLS(cmd);
         // creat a dummy server channel to make the acceptor start.
-        //Session dummy(ioService, "127.0.0.1", 1212, SessionMode::Server, "----");
+        //Session dummy(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "----");
         //auto dummyC = dummy.addChannel();
         //Finally f([&]() { dummyC.cancel(); });
 
-        Session s1(ioService, "127.0.0.1", 1212, SessionMode::Server);
-        Session s2(ioService, "127.0.0.1", 1212, SessionMode::Server);
-
-        Session c1(ioService, "127.0.0.1", 1212, SessionMode::Client);
-        Session c2(ioService, "127.0.0.1", 1212, SessionMode::Client);
+        Session s1(ioService, "127.0.0.1", 1212, SessionMode::Server,tls);
+        Session s2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls);
+        Session c1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls);
+        Session c2(ioService, "127.0.0.1", 1212, SessionMode::Client,tls);
 
         auto c1c1 = c1.addChannel();
         auto c1c2 = c1.addChannel();
@@ -90,9 +110,10 @@ namespace tests_cryptoTools
     }
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_CancelChannel_Test);
-    void BtNetwork_CancelChannel_Test()
+    void BtNetwork_CancelChannel_Test(const CLP& cmd)
     {
         u64 trials = 10;
+        auto tls = getIfTLS(cmd);
         //Timer& t = gTimer;
 
         for (u64 i = 0; i < trials; ++i)
@@ -101,11 +122,19 @@ namespace tests_cryptoTools
             ioService.showErrorMessages(false);
 
             {
-                Session c1(ioService, "127.0.0.1", 1212, SessionMode::Client);
+                Session c1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls);
 
                 auto ch1 = c1.addChannel("t1");
 
                 ch1.cancel();
+                // auto prom = std::promise<void>();
+                // ch1.asyncCancel([&](){
+                //     prom.set_value();
+                // });
+
+                // // std::this_thread::sleep_for(std::chrono::seconds(3));
+                // // oc::lout <<  ch1.mBase->mLog << std::endl;
+                // prom.get_future().get();
 
                 bool throws = false;
 
@@ -120,7 +149,7 @@ namespace tests_cryptoTools
             }
 
             {
-                Session c1(ioService, "127.0.0.1", 1212, SessionMode::Server);
+                Session c1(ioService, "127.0.0.1", 1212, SessionMode::Server,tls);
                 auto ch1 = c1.addChannel();
 
                 ch1.cancel();
@@ -145,8 +174,8 @@ namespace tests_cryptoTools
                 throw UnitTestFail();
 
             {
-                Session c1(ioService, "127.0.0.1", 1212, SessionMode::Server);
-                Session s1(ioService, "127.0.0.1", 1212, SessionMode::Client);
+                Session c1(ioService, "127.0.0.1", 1212, SessionMode::Server,tls);
+                Session s1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls);
                 auto ch1 = c1.addChannel("t2");
                 auto ch0 = s1.addChannel("t2");
 
@@ -185,16 +214,25 @@ namespace tests_cryptoTools
                 throw UnitTestFail();
 
             {
-                Session c1(ioService, "127.0.0.1", 1212, SessionMode::Server);
+                Session c1(ioService, "127.0.0.1", 1212, SessionMode::Server,tls);
                 auto ch1 = c1.addChannel("t3");
 
                 std::vector<u8> rr(10);
                 auto f = ch1.asyncSendFuture(rr.data(), rr.size());
 
-                auto thrd = std::thread([&]() {
+                //auto thrd = std::thread([&]() {
                     //std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    ch1.cancel();
-                    });
+                //    ch1.cancel();
+                //    });
+
+                auto prom = std::promise<void>();
+                ch1.asyncCancel([&](){
+                    prom.set_value();
+                });
+
+                //std::this_thread::sleep_for(std::chrono::seconds(3));
+                //oc::lout <<  ch1.mBase->mLog << std::endl;
+                prom.get_future().get();
 
                 bool throws = false;
                 try {
@@ -202,7 +240,7 @@ namespace tests_cryptoTools
                 }
                 catch (...) { throws = true; }
 
-                thrd.join();
+                //thrd.join();
 
                 if (ch1.isConnected())
                 {
@@ -230,9 +268,10 @@ namespace tests_cryptoTools
         //std::cout << t << std::endl << std::endl;
     }
 
-    void BtNetwork_oneWorker_Test()
+    void BtNetwork_oneWorker_Test(const CLP& cmd)
     {
         IOService ioService(1);
+        auto tls = getIfTLS(cmd);
 
         auto trials = 1;
         Session s1, c1;
@@ -245,12 +284,12 @@ namespace tests_cryptoTools
             std::promise<void> prom;
             std::atomic<u64> cntr(0);
             boost::asio::dispatch(ioService.mIoService, [&]() {
-                s1.start(ioService, "127.0.0.1", 1212, SessionMode::Server);
+                s1.start(ioService, "127.0.0.1", 1212, SessionMode::Server,tls);
                 if (cntr++ != 0)
                     lout << "logic error" << std::endl;
                 });
             boost::asio::dispatch(ioService.mIoService, [&]() {
-                c1.start(ioService, "127.0.0.1", 1212, SessionMode::Client);
+                c1.start(ioService, "127.0.0.1", 1212, SessionMode::Client,tls);
                 if (cntr++ != 1)
                     lout << "logic error" << std::endl;
                 });
@@ -306,18 +345,19 @@ namespace tests_cryptoTools
     }
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_ServerMode_Test);
-    void BtNetwork_ServerMode_Test()
+    void BtNetwork_ServerMode_Test(const CLP& cmd)
     {
         u64 numConnect = 25;
         IOService ioService(0);
         std::vector<std::array<Channel, 2>> srvChls(numConnect), clientChls(numConnect);
+        auto tls = getIfTLS(cmd);
 
         for (u64 i = 0; i < numConnect; ++i)
         {
 
             //std::cout << " " <<i<<std::flush;
-            Session s1(ioService, "127.0.0.1", 1212, SessionMode::Server);
-            Session c1(ioService, "127.0.0.1", 1212, SessionMode::Client);
+            Session s1(ioService, "127.0.0.1", 1212, SessionMode::Server,tls);
+            Session c1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls);
             srvChls[i][0] = s1.addChannel();
             srvChls[i][1] = s1.addChannel();
             clientChls[i][0] = c1.addChannel();
@@ -356,8 +396,8 @@ namespace tests_cryptoTools
         for (u64 i = 0; i < numConnect; ++i)
         {
             //ıstd::cout << " " <<i<<std::flush;
-            Session s1(ioService, "127.0.0.1", 1212, SessionMode::Server);
-            Session c1(ioService, "127.0.0.1", 1212, SessionMode::Client);
+            Session s1(ioService, "127.0.0.1", 1212, SessionMode::Server,tls);
+            Session c1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls);
             clientChls[i][0] = c1.addChannel();
             clientChls[i][1] = c1.addChannel();
 
@@ -412,9 +452,10 @@ namespace tests_cryptoTools
     }
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_Connect1_Test);
-    void BtNetwork_Connect1_Test()
+    void BtNetwork_Connect1_Test(const CLP& cmd)
     {
         setThreadName("Test_Host");
+        auto tls = getIfTLS(cmd);
 
         std::string channelName{ "TestChannel" };
         std::string msg{ "This is the message" };
@@ -425,7 +466,7 @@ namespace tests_cryptoTools
             {
                 setThreadName("Test_Client");
 
-                Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
+                Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
                 chl1 = endpoint.addChannel(channelName, channelName);
 
                 std::string recvMsg;
@@ -437,32 +478,36 @@ namespace tests_cryptoTools
                 chl1.close();
             });
 
-        Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
-        chl2 = endpoint.addChannel(channelName, channelName);
+        try{
 
-        chl2.asyncSend(msg);
+            Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
+            chl2 = endpoint.addChannel(channelName, channelName);
 
-        std::string clientRecv;
-        chl2.recv(clientRecv);
+            chl2.asyncSend(msg);
 
+            std::string clientRecv;
+            chl2.recv(clientRecv);
+
+            if (clientRecv != msg) 
+                throw UnitTestFail();
+        }
+        catch(std::exception& e)
+        {
+            lout << e.what() << std::endl;
+            thrd.join();
+            throw;
+        }
         thrd.join();
-        if (clientRecv != msg) throw UnitTestFail();
 
-        //std::cout << "chl1: " << chl1.mBase->mLog << std::endl;
-        chl2.close();
-        endpoint.stop();
-        ioService.stop();
+    } 
 
-        //std::cout << "acpt: " << ioService.mAcceptors.begin()->mLog << std::endl;
-        //std::cout << "chl2: " << chl2.mBase->mLog << std::endl;
-    }
-
-    void BtNetwork_BadConnect_Test()
+    void BtNetwork_BadConnect_Test(const CLP& cmd)
     {
         IOService ios;
         ios.showErrorMessages(false);
+        auto tls = getIfTLS(cmd);
 
-        Session server(ios, "127.0.0.1:1212", SessionMode::Server);
+        Session server(ios, "127.0.0.1", 1212, SessionMode::Server,tls);
         auto chl = server.addChannel();
 
         boost::asio::ip::tcp::socket sock(ios.mIoService);
@@ -478,7 +523,7 @@ namespace tests_cryptoTools
         sock.close(ec);
 
 
-        Session client(ios, "127.0.0.1:1212", SessionMode::Client);
+        Session client(ios, "127.0.0.1", 1212, SessionMode::Client,tls);
         auto chl2 = client.addChannel();
 
         //chl.waitForConnection(std::chrono::seconds(1));
@@ -486,9 +531,10 @@ namespace tests_cryptoTools
 
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_OneMegabyteSend_Test);
-    void BtNetwork_OneMegabyteSend_Test()
+    void BtNetwork_OneMegabyteSend_Test(const CLP& cmd)
     {
         setThreadName("Test_Host");
+        auto tls = getIfTLS(cmd);
 
         std::string channelName{ "TestChannel" };
         std::string msg{ "This is the message" };
@@ -503,7 +549,7 @@ namespace tests_cryptoTools
             {
                 setThreadName("Test_Client");
 
-                Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
+                Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
                 Channel chl = endpoint.addChannel(channelName, channelName);
 
                 std::vector<u8> srvRecv;
@@ -515,7 +561,7 @@ namespace tests_cryptoTools
                 auto act = chl.getTotalDataRecv();
                 auto exp = oneMegabyte.size() + 4;
 
-                if (act != exp)
+                if (!tls && act != exp)
                     throw UnitTestFail("channel recv statistics incorrectly increased." LOCATION);
 
                 if (srvRecv != oneMegabyte)
@@ -527,13 +573,13 @@ namespace tests_cryptoTools
         Finally f([&] { thrd.join(); });
 
 
-        Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+        Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
         auto chl = endpoint.addChannel(channelName, channelName);
 
 
-        if (chl.getTotalDataSent() != 0)
+        if (!tls && chl.getTotalDataSent() != 0)
             throw UnitTestFail("channel send statistics incorrectly initialized." LOCATION);
-        if (chl.getTotalDataRecv() != 0)
+        if (!tls && chl.getTotalDataRecv() != 0)
             throw UnitTestFail("channel recv statistics incorrectly initialized." LOCATION);
 
 
@@ -542,9 +588,9 @@ namespace tests_cryptoTools
         chl.recv(clientRecv);
         chl.close();
 
-        if (chl.getTotalDataSent() != oneMegabyte.size() + 4)
+        if (!tls && chl.getTotalDataSent() != oneMegabyte.size() + 4)
             throw UnitTestFail("channel send statistics incorrectly increased." LOCATION);
-        if (chl.getTotalDataRecv() != oneMegabyte.size() + 4)
+        if (!tls && chl.getTotalDataRecv() != oneMegabyte.size() + 4)
             throw UnitTestFail("channel recv statistics incorrectly increased." LOCATION);
 
         chl.resetStats();
@@ -564,9 +610,10 @@ namespace tests_cryptoTools
 
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_ConnectMany_Test);
-    void BtNetwork_ConnectMany_Test()
+    void BtNetwork_ConnectMany_Test(const CLP& cmd)
     {
         //InitDebugPrinting();
+        auto tls = getIfTLS(cmd);
         setThreadName("Test_Host");
 
         std::string channelName{ "TestChannel" };
@@ -574,7 +621,7 @@ namespace tests_cryptoTools
         u64 numChannels(15);
         u64 messageCount(15);
 
-        bool print(false);
+        //bool print(false);
 
         std::vector<u8> buff(64);
 
@@ -588,14 +635,14 @@ namespace tests_cryptoTools
                 IOService ioService;
                 setThreadName("Test_client");
 
-                Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
+                Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
 
                 std::vector<std::thread> threads;
 
                 for (u64 i = 0; i < numChannels; i++)
                 {
                     auto chl = endpoint.addChannel();
-                    threads.emplace_back([i, &buff, chl, messageCount, print, channelName]()mutable
+                    threads.emplace_back([i, &buff, chl, messageCount]()mutable
                         {
                             setThreadName("Test_client_" + std::to_string(i));
                             std::vector<u8> mH;
@@ -621,14 +668,14 @@ namespace tests_cryptoTools
 
         IOService ioService;
 
-        Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+        Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
         std::vector<std::thread> threads;
 
         for (u64 i = 0; i < numChannels; i++)
         {
             auto chl = endpoint.addChannel();
-            threads.emplace_back([i, chl, &buff, messageCount, print, channelName]() mutable
+            threads.emplace_back([i, chl, &buff, messageCount]() mutable
                 {
                     setThreadName("Test_Host_" + std::to_string(i));
                     std::vector<u8> mH(buff);
@@ -657,14 +704,15 @@ namespace tests_cryptoTools
 
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_CrossConnect_Test);
-    void BtNetwork_CrossConnect_Test()
+    void BtNetwork_CrossConnect_Test(const CLP& cmd)
     {
         const block send = _mm_set_epi64x(123412156, 123546);
         const block recv = _mm_set_epi64x(7654333, 8765433);
+        auto tls = getIfTLS(cmd);
 
         auto thrd = std::thread([&]() {
             IOService ioService(0);
-            Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
+            Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
 
 
             auto sendChl1 = endpoint.addChannel("send", "recv");
@@ -692,7 +740,7 @@ namespace tests_cryptoTools
             ioService.stop();
             });
         IOService ioService(0);
-        Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+        Session endpoint(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
 
         auto recvChl0 = endpoint.addChannel("recv", "send");
@@ -717,9 +765,10 @@ namespace tests_cryptoTools
     }
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_ManySessions_Test);
-    void BtNetwork_ManySessions_Test()
+    void BtNetwork_ManySessions_Test(const CLP& cmd)
     {
         u64 nodeCount = 10;
+        auto tls = getIfTLS(cmd);
         u32 basePort = 1212;
         std::string ip("127.0.0.1");
         //InitDebugPrinting();
@@ -759,7 +808,7 @@ namespace tests_cryptoTools
                             port = basePort;// +(u32)j;
                         }
 
-                        sessions.emplace_back(ioService, ip, port, host, name);
+                        sessions.emplace_back(ioService, ip, port, host, tls, name);
 
                         channels.push_back(sessions.back().addChannel("chl", "chl"));
                     }
@@ -799,10 +848,11 @@ namespace tests_cryptoTools
     }
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_AsyncConnect_Test);
-    void BtNetwork_AsyncConnect_Test()
+    void BtNetwork_AsyncConnect_Test(const CLP& cmd)
     {
         setThreadName("Test_Host");
 
+        auto tls = getIfTLS(cmd);
         IOService ioService(4);
         Channel chl1, chl2;
         try {
@@ -811,14 +861,14 @@ namespace tests_cryptoTools
             std::string msg{ "This is the message" };
 
 
-            Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
+            Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
             chl1 = ep1.addChannel(channelName, channelName);
 
             if (chl1.isConnected() == true)
                 throw UnitTestFail(LOCATION);
 
 
-            Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+            Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
             if (chl1.isConnected() == true)
                 throw UnitTestFail(LOCATION);
@@ -832,7 +882,7 @@ namespace tests_cryptoTools
             if (chl1.isConnected() == false)
             {
                 lout << "ec " << !chl1.mBase->mStartOp->mEC << " " << chl1.mBase->mStartOp->mEC.message() << std::endl;
-                lout << "ic " << chl1.mBase->mStartOp->mIsComplete << std::endl;
+                lout << "ic " << chl1.mBase->mStartOp->mFinalized << std::endl;
                 throw UnitTestFail(LOCATION);
             }
             chl2.waitForConnection();
@@ -856,14 +906,15 @@ namespace tests_cryptoTools
     }
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_std_Containers_Test);
-    void BtNetwork_std_Containers_Test()
+    void BtNetwork_std_Containers_Test(const CLP& cmd)
     {
         setThreadName("Test_Host");
         std::string channelName{ "TestChannel" }, msg{ "This is the message" };
+        auto tls = getIfTLS(cmd);
         IOService ioService;
 
-        Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
-        Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+        Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
+        Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
         auto chl1 = ep1.addChannel(channelName, channelName);
         auto chl2 = ep2.addChannel(channelName, channelName);
@@ -907,14 +958,15 @@ namespace tests_cryptoTools
 
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_bitVector_Test);
-    void BtNetwork_bitVector_Test()
+    void BtNetwork_bitVector_Test(const CLP& cmd)
     {
         setThreadName("Test_Host");
         std::string channelName{ "TestChannel" }, msg{ "This is the message" };
+        auto tls = getIfTLS(cmd);
         IOService ioService;
 
-        Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
-        Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+        Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
+        Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
         auto chl1 = ep1.addChannel(channelName, channelName);
         auto chl2 = ep2.addChannel(channelName, channelName);
@@ -937,18 +989,19 @@ namespace tests_cryptoTools
 
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_recvErrorHandler_Test);
-    void BtNetwork_recvErrorHandler_Test()
+    void BtNetwork_recvErrorHandler_Test(const CLP& cmd)
     {
 
 
         setThreadName("Test_Host");
         std::string channelName{ "TestChannel" }, msg{ "This is the message" };
+        auto tls = getIfTLS(cmd);
         IOService ioService;
 
         ioService.showErrorMessages(false);
 
-        Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
-        Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+        Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
+        Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
         auto chl1 = ep1.addChannel(channelName, channelName);
         auto chl2 = ep2.addChannel(channelName, channelName);
@@ -1000,7 +1053,7 @@ namespace tests_cryptoTools
     }
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_closeOnError_Test);
-    void BtNetwork_closeOnError_Test()
+    void BtNetwork_closeOnError_Test(const CLP& cmd)
     {
 
         bool throws = false;
@@ -1009,11 +1062,12 @@ namespace tests_cryptoTools
             setThreadName("Test_Host");
             std::string channelName{ "TestChannel" }, msg{ "This is the message" };
             IOService ioService;
+            auto tls = getIfTLS(cmd);
 
             ioService.showErrorMessages(false);
 
-            Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
-            Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+            Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
+            Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
             auto chl1 = ep1.addChannel(channelName, channelName);
 
@@ -1053,9 +1107,10 @@ namespace tests_cryptoTools
             std::string channelName{ "TestChannel" }, msg{ "This is the message" };
             IOService ioService;
             ioService.showErrorMessages(false);
+            auto tls = getIfTLS(cmd);
 
-            Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
-            Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+            Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
+            Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
             auto chl1 = ep1.addChannel(channelName, channelName);
             auto chl2 = ep2.addChannel(channelName, channelName);
@@ -1091,13 +1146,14 @@ namespace tests_cryptoTools
 
     }
 
-    void BtNetwork_clientClose_Test()
+    void BtNetwork_clientClose_Test(const CLP& cmd)
     {
         u64 trials(100);
         u64 count = 0;
+        auto tls = getIfTLS(cmd);
 
         Timer timer;
-        auto start = timer.setTimePoint("start");
+        timer.setTimePoint("start");
 
         IOService ios;
         ios.mPrint = false;
@@ -1109,8 +1165,8 @@ namespace tests_cryptoTools
 
                 timer.setTimePoint("io serivce");
 
-                Session server(ios, "127.0.0.1", 1212, SessionMode::Server);
-                Session client(ios, "127.0.0.1", 1212, SessionMode::Client);
+                Session server(ios, "127.0.0.1", 1212, SessionMode::Server,tls);
+                Session client(ios, "127.0.0.1", 1212, SessionMode::Client,tls);
                 timer.setTimePoint("sessions");
 
 
@@ -1222,13 +1278,14 @@ namespace tests_cryptoTools
     };
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_SocketInterface_Test);
-    void BtNetwork_SocketInterface_Test()
+    void BtNetwork_SocketInterface_Test(const CLP& cmd)
     {
         setThreadName("main");
         try {
             std::string channelName{ "TestChannel" }, msg{ "This is the message" };
             IOService ioService;
             IOService ioService2;
+            auto tls = getIfTLS(cmd);
 
             ioService.showErrorMessages(false);
 
@@ -1237,8 +1294,8 @@ namespace tests_cryptoTools
             for (u64 i = 0; i < trials; ++i)
             {
 
-                Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
-                Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+                Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
+                Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
                 auto chl1 = ep1.addChannel(channelName, channelName);
                 auto chl2 = ep2.addChannel(channelName, channelName);
@@ -1275,13 +1332,14 @@ namespace tests_cryptoTools
 
 
     //OSU_CRYPTO_ADD_TEST(globalTests, BtNetwork_RapidConnect_Test);
-    void BtNetwork_RapidConnect_Test()
+    void BtNetwork_RapidConnect_Test(const CLP& cmd)
     {
 
         u64 trials = 100;
         std::string channelName{ "TestChannel" }, msg{ "This is the message" };
         IOService ioService;
 
+        auto tls = getIfTLS(cmd);
         ioService.showErrorMessages(false);
 
         for (u64 i = 0; i < trials; ++i)
@@ -1289,8 +1347,8 @@ namespace tests_cryptoTools
 
             try {
 
-                Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client, "endpoint");
-                Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server, "endpoint");
+                Session ep1(ioService, "127.0.0.1", 1212, SessionMode::Client,tls, "endpoint");
+                Session ep2(ioService, "127.0.0.1", 1212, SessionMode::Server,tls, "endpoint");
 
                 auto chl1 = ep1.addChannel(channelName, channelName);
                 auto chl2 = ep2.addChannel(channelName, channelName);
@@ -1311,7 +1369,134 @@ namespace tests_cryptoTools
                 throw;
             }
         }
+    }
 
+    void BtNetwork_useAfterCancel_test(const CLP& cmd)
+    {
+        IOService ios;
+        ios.mPrint = false;
+        bool failed = false;
+        std::atomic<u32> counts; counts = 0;
+        u32 countEnd = 1;
+        std::promise<void> prom;
+
+        std::array<oc::Channel, 2> chls{
+            Session(ios, "127.0.0.1:1212", SessionMode::Client).addChannel(),
+            Session(ios, "127.0.0.1:1212", SessionMode::Server).addChannel()
+        };
+
+        chls[0].waitForConnection();
+        chls[1].waitForConnection();
+
+        std::vector<u8> msg(10);
+        // chls[0].send(msg);
+        // chls[1].recv(msg);
+
+        chls[0].cancel(false);
+
+        chls[0].asyncRecv(msg, [&](const error_code& ec){
+            if(!ec)
+                failed = true;
+            if(++counts == countEnd)
+                prom.set_value();
+        });
+
+        // chls[0].asyncSend(std::move(msg), [&](const error_code& ec){
+        //     if(!ec)
+        //         failed = true;
+        //     if(++counts == countEnd)
+        //         prom.set_value();
+        // });
+
+        prom.get_future().get();
+
+        chls[0].close();
+        chls[1].close();
+
+        if(failed)
+            throw UnitTestFail();
+    }
+
+    void BtNetwork_fastCancel(const CLP& cmd)
+    {
+        //throw UnitTestSkipped("known issue");
+        std::string ip = "127.0.0.1";
+        u32 port = 1212;
+        //u64 n = 1;
+        IOService ios;
+        ios.mPrint = false;
+
+        std::array<oc::Channel, 2> chls{
+            Session(ios, ip, port, SessionMode::Client).addChannel(),
+            Session(ios, ip, port, SessionMode::Server).addChannel()
+        };
+
+        bool failed = false;
+
+        std::atomic<u32> count; count = 0;
+        std::promise<void>prom;
+        std::array<oc::completion_handle, 2> recvFuncs;
+        std::array<oc::completion_handle, 2> sendFuncs;
+
+        std::vector<u8> msg(10);
+        
+
+        for (u64 j = 0; j < 2; ++j)
+        {
+            recvFuncs[j] = [&, j](const oc::error_code& ec) mutable {
+                if (!ec)
+                {
+                    auto c = recvFuncs[j];
+                    chls[j].asyncRecv(msg, std::move(c));
+                }
+                else
+                {
+                    if (++count == 4)
+                        prom.set_value();
+                }
+            };
+
+            sendFuncs[j] = [&, j](const oc::error_code& ec)mutable
+            {
+                if (!ec)
+                {
+                    auto c = sendFuncs[j];
+                    auto m = msg;
+                    chls[j].asyncSend(std::move(m), std::move(c));
+                }
+                else
+                {
+                    if (++count == 4)
+                        prom.set_value();
+                }
+            };
+        }
+
+        for (u64 j = 0; j < 2; ++j)
+        {
+            auto r = recvFuncs[j];
+            chls[j].asyncRecv(msg, std::move(r));
+
+            auto s = sendFuncs[j];
+            auto m = msg;
+            chls[j].asyncSend(std::move(m), std::move(s));
+        }
+
+        chls[0].waitForConnection();
+        chls[1].waitForConnection();
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+        chls[0].cancel(false);
+
+        //chls[0].mBase->mHandle->close();
+
+        prom.get_future().get();
+
+        //chls = {};//.clear();
+
+        if (failed)
+            throw UnitTestFail();
     }
 
 
@@ -1401,4 +1586,35 @@ namespace tests_cryptoTools
             }
         }
     }
+
+    void BtNetwork_queue_Test(const osuCrypto::CLP& cmd)
+    {
+        SpscQueue<int> queue;
+
+        u64 n = 1000;
+        //u64 t = 10;
+
+        std::vector<std::thread> thrds(10);
+
+        for(u64 tt = 0;tt < thrds.size(); ++tt)
+        {
+            thrds[tt] = std::thread([&](){
+                for(u64 i =0; i < n; ++i)
+                {
+                    queue.push_back(std::move(i));                    
+                }
+            });
+        }
+
+        u64 total = n * thrds.size();
+        for(u64 i =0; i < total; ++i)
+        {
+            if(queue.isEmpty() == false)
+                queue.pop_front();
+        }
+
+        for(u64 tt = 0;tt < thrds.size(); ++tt)
+            thrds[tt].join();
+    }
+
 }

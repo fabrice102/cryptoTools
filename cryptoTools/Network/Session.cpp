@@ -16,33 +16,16 @@ namespace osuCrypto {
 	//extern std::vector<std::string> split(const std::string &s, char delim);
 
 
+
+	SessionBase::SessionBase(IOService& ios) 
+		: mRealRefCount(1)
+		, mWorker(ios, "Session:" + std::to_string((u64)this)) 
+	{}
+
 	void Session::start(IOService& ioService, std::string remoteIP, u32 port, SessionMode type, std::string name)
 	{
-		if (mBase && mBase->mStopped == false)
-			throw std::runtime_error("rt error at " LOCATION); 
-
-		mBase.reset(new SessionBase(ioService.mIoService));
-		mBase->mIP = (remoteIP);
-		mBase->mPort = (port);
-		mBase->mMode = (type);
-		mBase->mIOService = &(ioService);
-		mBase->mStopped = (false);
-		mBase->mName = (name);
-
-
-		if (type == SessionMode::Server)
-		{
-			ioService.aquireAcceptor(mBase);
-		}
-		else
-		{
-			std::random_device rd;
-			mBase->mSessionID = (1ULL << 32) * rd() + rd();
-
-			boost::asio::ip::tcp::resolver resolver(ioService.mIoService);
-			boost::asio::ip::tcp::resolver::query query(remoteIP, boost::lexical_cast<std::string>(port));
-			mBase->mRemoteAddr = *resolver.resolve(query);
-		}
+        TLSContext ctx;
+        start(ioService, remoteIP, port, type, ctx, name);
 	}
 
 	void Session::start(IOService& ioService, std::string address, SessionMode host, std::string name)
@@ -61,6 +44,43 @@ namespace osuCrypto {
 
 	}
 
+    void Session::start(IOService& ioService, std::string ip, u64 port, SessionMode type, TLSContext& tls, std::string name)
+    {
+        if (mBase && mBase->mStopped == false)
+            throw std::runtime_error("rt error at " LOCATION);
+#ifdef ENABLE_WOLFSSL
+        if (tls && 
+            (tls.mode() != WolfContext::Mode::Both) &&
+            (tls.mode() == WolfContext::Mode::Server) != (type == SessionMode::Server))
+            throw std::runtime_error("TLS context isServer does not match SessionMode");
+#endif
+
+
+        mBase.reset(new SessionBase(ioService));
+        mBase->mIP = std::move(ip);
+        mBase->mPort = static_cast<u32>(port);
+        mBase->mMode = (type);
+        mBase->mIOService = &(ioService);
+        mBase->mStopped = (false);
+        mBase->mTLSContext = tls;
+        mBase->mName = (name);
+
+
+        if (type == SessionMode::Server)
+        {
+            ioService.aquireAcceptor(mBase);
+        }
+        else
+        {
+            std::random_device rd;
+            mBase->mSessionID = (1ULL << 32) * rd() + rd();
+
+            boost::asio::ip::tcp::resolver resolver(ioService.mIoService);
+            boost::asio::ip::tcp::resolver::query query(mBase->mIP, boost::lexical_cast<std::string>(port));
+            mBase->mRemoteAddr = *resolver.resolve(query);
+        }
+    }
+
 	// See start(...)
 
 	Session::Session(IOService & ioService, std::string address, SessionMode type, std::string name)
@@ -74,6 +94,12 @@ namespace osuCrypto {
 	{
 		start(ioService, remoteIP, port, type, name);
 	}
+
+    Session::Session(IOService& ioService, std::string remoteIP, u32 port
+        , SessionMode type, TLSContext& ctx, std::string name)
+    {
+        start(ioService, remoteIP, port, type, ctx, name);
+    }
 
 
 	// Default constructor
@@ -166,7 +192,7 @@ namespace osuCrypto {
 			mStopped = true;
 			if (mAcceptor)
 				mAcceptor->unsubscribe(this);
-			mWorker.reset(nullptr);
+			mWorker.reset();
 		}
 	}
 

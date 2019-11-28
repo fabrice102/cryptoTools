@@ -113,11 +113,39 @@ if (ENABLE_RELIC)
   endif (NOT Relic_FOUND)
 
   message(STATUS "Relic_LIB:  ${RELIC_LIBRARIES}")
+  message(STATUS "Relic_inc:  ${RELIC_INCLUDE_DIR}")
 
   target_include_directories(cryptoTools PUBLIC ${RELIC_INCLUDE_DIR}) 
   target_link_libraries(cryptoTools ${RELIC_LIBRARIES})
 
 endif (ENABLE_RELIC)
+
+## WolfSSL
+###########################################################################
+
+if(ENABLE_WOLFSSL)
+
+  if(NOT DEFINED WolfSSL_DIR)
+    set(WolfSSL_DIR "/usr/local/")
+  endif()
+  
+
+  find_library(WOLFSSL_LIB NAMES wolfssl  HINTS "${WolfSSL_DIR}")
+  set(WOLFSSL_LIB_INCLUDE_DIRS "${WolfSSL_DIR}include/")
+  
+  # if we cant fint it, throw an error
+  if(NOT WOLFSSL_LIB)
+      message(FATAL_ERROR "Failed to find WolfSSL at " ${WolfSSL_DIR})
+  endif()
+
+  message(STATUS "WOLFSSL_LIB:  ${WOLFSSL_LIB}")
+  message(STATUS "WOLFSSL_INC:  ${WOLFSSL_LIB_INCLUDE_DIRS}")
+
+
+  target_include_directories(cryptoTools PUBLIC "${WOLFSSL_LIB_INCLUDE_DIRS}") 
+  target_link_libraries(cryptoTools ${WOLFSSL_LIB})
+
+endif(ENABLE_WOLFSSL)
 
 ## Boost
 ###########################################################################
@@ -126,19 +154,16 @@ set(BOOST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/linux/boost/")
 
 set(Boost_USE_STATIC_LIBS        ON) # only find static libs
 set(Boost_USE_MULTITHREADED      ON)
-set(Boost_USE_STATIC_RUNTIME     ON)
+# set(Boost_USE_STATIC_RUNTIME     ON)
 
-find_package(Boost 1.66.0 COMPONENTS system thread)
+find_package(Boost 1.69.0 COMPONENTS system thread)
 
 
 
 if(NOT Boost_FOUND)
-    message(FATAL_ERROR "Failed to find boost 1.66.0 or newer. Looked at system dirs and: " ${BOOST_ROOT})
+    message(FATAL_ERROR "Failed to find boost 1.69.0 or newer. Looked at system dirs and: " ${BOOST_ROOT})
 endif()
 
-
-#MESSAGE(STATUS "boost ---  ${Boost_LIBRARIES}")
-#include_directories(${Boost_INCLUDE_DIR}) 
 
 target_include_directories(cryptoTools PUBLIC ${Boost_INCLUDE_DIR}) 
 target_link_libraries(cryptoTools ${Boost_LIBRARIES})
@@ -151,8 +176,6 @@ ENDIF(INSTALL_BOOST)
 
 #file(COPY ${Boost_LIBRARIES}  DESTINATION ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY})
 #FILE(COPY "${Boost_INCLUDE_DIR}/boost" DESTINATION "${CMAKE_SOURCE_DIR}/include/boost")
-message(STATUS "Boost_include  ${Boost_INCLUDE_DIR}" )
 
-
-
-#target_link_libraries(cryptoTools "dl")
+message(STATUS "Boost_LIB: ${Boost_LIBRARIES}" )
+message(STATUS "Boost_INC: ${Boost_INCLUDE_DIR}" )

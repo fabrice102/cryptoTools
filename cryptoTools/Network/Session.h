@@ -7,6 +7,8 @@
 #include <list>
 #include <mutex>
 #include <memory>
+#include "TLS.h"
+#include "util.h"
 
 namespace osuCrypto {
 
@@ -30,7 +32,6 @@ namespace osuCrypto {
 		// address if the same IOService is used but with different name.
         void start(IOService& ioService, std::string remoteIp, u32 port, SessionMode type, std::string name = "");
 
-
 		// Start a session for the given address in either Client or Server mode.
 		// The server should use their local address on which the socket should bind.
 		// The client should use the address of the server.
@@ -38,11 +39,16 @@ namespace osuCrypto {
 		// address if the same IOService is used but with different name.
         void start(IOService& ioService, std::string address, SessionMode type, std::string name = "");
 
+        void start(IOService& ioService, std::string ip, u64 port, SessionMode type, TLSContext& tls, std::string name = "");
+
+
 		// See start(...)
 		Session(IOService & ioService, std::string address, SessionMode type, std::string name = "");
 
 		// See start(...)
-		Session(IOService & ioService, std::string remoteIP, u32 port, SessionMode type, std::string name = "");
+        Session(IOService& ioService, std::string remoteIP, u32 port, SessionMode type, std::string name = "");
+
+        Session(IOService & ioService, std::string remoteIP, u32 port, SessionMode type, TLSContext& tls, std::string name = "");
 
 		// Default constructor
 		Session();
@@ -79,13 +85,11 @@ namespace osuCrypto {
     };
 
 	typedef Session Endpoint;
-
+	class IOService;
+	
 	struct SessionBase
 	{
-		SessionBase(boost::asio::io_service& ios) 
-			: mRealRefCount(1)
-			, mWorker(new boost::asio::io_service::work(ios)) {}
-
+		SessionBase(IOService& ios);
 		~SessionBase();
 
 		void stop();
@@ -106,10 +110,12 @@ namespace osuCrypto {
 
 		std::atomic<u32> mRealRefCount;
 
-		std::unique_ptr<boost::asio::io_service::work> mWorker;
+		Work mWorker;
 
 		//bool mHasGroup = false;
 		std::shared_ptr<details::SessionGroup> mGroup;
+
+        TLSContext mTLSContext;
 
 		std::mutex mAddChannelMtx;
 		std::string mName;
